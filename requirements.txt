@@ -1,0 +1,29 @@
+# Core dependencies
+numpy==1.24.3
+pandas==2.0.1
+geopandas==0.13.0
+shapely==2.0.1
+pyproj==3.5.0
+rtree==1.0.1
+
+# Geospatial analysis
+osmnx==1.3.0
+networkx==3.1
+folium==0.14.0
+pydeck==0.8.0
+plotly==5.14.1
+
+# Data acquisition
+requests==2.30.0
+beautifulsoup4==4.12.2
+census==0.8.20
+gtfs-kit==5.2.6
+
+# Visualization and app
+streamlit==1.22.0
+matplotlib==3.7.1
+seaborn==0.12.2
+
+# Utilities
+tqdm==4.65.0
+python-dotenv==1.0.0
