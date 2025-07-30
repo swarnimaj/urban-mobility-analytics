@@ -41,16 +41,69 @@ st.subheader("Mobility Accessibility Map")
 st.info("Map will be displayed here once data is loaded.")
 
 # Display tabs for different analyses
-tab1, tab2, tab3, tab4 = st.tabs([
+tab_transit, tab2, tab3, tab4 = st.tabs([
     "Transit Access", 
     "Sidewalk Quality", 
     "Amenity Proximity",
     "Street Connectivity"
 ])
 
-with tab1:
-    st.markdown("### Transit Access Score")
-    st.info("Transit access analysis will be displayed here.")
+with tab_transit:
+    st.header("Transit Accessibility")
+    
+    # Load transit data if it exists
+    transit_data_path = Path("data/processed/gtfs/king_county_metro/stops.geojson")
+    if transit_data_path.exists():
+        # Load the data
+        transit_stops = gpd.read_file(transit_data_path)
+        
+        # Display basic statistics
+        st.metric("Total Transit Stops", len(transit_stops))
+        
+        if 'wheelchair_accessible' in transit_stops.columns:
+            accessible_stops = transit_stops[transit_stops['wheelchair_accessible'] == 'yes'].shape[0]
+            pct_accessible = (accessible_stops / len(transit_stops)) * 100
+            st.metric("Wheelchair Accessible Stops", f"{accessible_stops} ({pct_accessible:.1f}%)")
+        
+        # Display map
+        st.subheader("Transit Stops Map")
+        
+        # Use Pydeck for an interactive map
+        import pydeck as pdk
+        
+        # Define color based on wheelchair accessibility
+        transit_stops['color'] = transit_stops['wheelchair_accessible'].map({
+            'yes': [0, 255, 0, 200],  # Green
+            'no': [255, 0, 0, 200],   # Red
+            'unknown': [128, 128, 128, 200]  # Gray
+        }).fillna([128, 128, 128, 200])
+        
+        # Create the layer
+        layer = pdk.Layer(
+            "ScatterplotLayer",
+            transit_stops,
+            get_position=['stop_lon', 'stop_lat'],
+            get_color='color',
+            get_radius=100,
+            pickable=True
+        )
+        
+        # Set the initial view
+        view_state = pdk.ViewState(
+            latitude=transit_stops['stop_lat'].mean(),
+            longitude=transit_stops['stop_lon'].mean(),
+            zoom=10,
+            pitch=0
+        )
+        
+        # Render the map
+        st.pydeck_chart(pdk.Deck(
+            layers=[layer],
+            initial_view_state=view_state,
+            tooltip={"text": "{stop_name}\nWheelchair Accessible: {wheelchair_accessible}"}
+        ))
+    else:
+        st.info("Transit data not yet processed. Run the GTFS processor to see transit accessibility data.")
     
 with tab2:
     st.markdown("### Sidewalk Quality Score")

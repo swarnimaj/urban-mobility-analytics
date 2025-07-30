@@ -2,6 +2,7 @@
 numpy==1.24.3
 pandas==2.0.1
 geopandas==0.13.0
+fiona==1.9.4
 shapely==2.0.1
 pyproj==3.5.0
 rtree==1.0.1
