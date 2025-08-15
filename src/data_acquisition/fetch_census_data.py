@@ -303,25 +303,25 @@ class CensusFetcher:
         
         # Check for missing geometries if it's a GeoDataFrame
         if isinstance(data, gpd.GeoDataFrame):
-            missing_geoms = data.geometry.isna().sum()
+            missing_geoms = int(data.geometry.isna().sum())
             if missing_geoms > 0:
                 issues['missing_geometries'] = missing_geoms
         
         # Check for missing demographic values
         for col in data.columns:
             if col not in ['geometry', 'name', 'geoid', 'state', 'county', 'tract']:
-                missing = data[col].isna().sum()
+                missing = int(data[col].isna().sum())
                 if missing > 0:
                     issues[f'missing_{col}'] = missing
         
         # Check for unreasonable values
         if 'median_household_income' in data.columns:
-            unreasonable = data[data['median_household_income'] > 500000].shape[0]
+            unreasonable = int(data[data['median_household_income'] > 500000].shape[0])
             if unreasonable > 0:
                 issues['unreasonable_income'] = unreasonable
         
         if 'total_population' in data.columns:
-            zero_pop = data[data['total_population'] == 0].shape[0]
+            zero_pop = int(data[data['total_population'] == 0].shape[0])
             if zero_pop > 0:
                 issues['zero_population_tracts'] = zero_pop
         
