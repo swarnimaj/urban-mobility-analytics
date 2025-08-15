@@ -247,8 +247,8 @@ class OSMDataSource:
     
     def __init__(self):
         """Initialize OSM data source."""
-        # Configure OSMnx
-        ox.config(use_cache=True, log_console=True)
+        # Configure OSMnx - removed deprecated config call
+        # OSMnx no longer uses ox.config() in newer versions
     
     def get_street_network(self, place_name, network_type='drive'):
         """
@@ -302,7 +302,7 @@ class OSMDataSource:
             tags = {'amenity': amenity_types}
             
             # Get the amenities within the polygon
-            gdf = ox.geometries_from_polygon(polygon, tags)
+            gdf = ox.features_from_polygon(polygon, tags)
             
             if gdf.empty:
                 logger.warning(f"No amenities found for {place_name} with types {amenity_types}")
@@ -343,7 +343,7 @@ class OSMDataSource:
             }
             
             # Get the features within the polygon
-            gdf = ox.geometries_from_polygon(polygon, tags)
+            gdf = ox.features_from_polygon(polygon, tags)
             
             if gdf.empty:
                 logger.warning(f"No accessibility features found for {place_name}")
