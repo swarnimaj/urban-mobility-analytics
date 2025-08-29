@@ -41,7 +41,9 @@ PROCESSED_DATA_DIR.mkdir(parents=True, exist_ok=True)
 # Define known GTFS feed URLs for major transit agencies
 GTFS_FEED_URLS = {
     "king_county_metro": "https://kingcounty.gov/~/media/depts/metro/data/gtfs/current-gtfs-zip",
-    "sound_transit": "https://www.soundtransit.org/help-contacts/business-information/open-transit-data-otd/downloads",
+    "sound_transit": "https://www.soundtransit.org/GTFS-rail/40_gtfs.zip",
+    "community_transit": "https://www.soundtransit.org/GTFS-CT/current.zip",
+    "pierce_transit": "https://www.soundtransit.org/GTFS-PT/gtfs.zip",
     "portland_trimet": "https://developer.trimet.org/schedule/gtfs.zip",
     "sf_muni": "https://gtfs.sfmta.com/transitdata/google_transit.zip"
 }
@@ -153,8 +155,8 @@ class GTFSProcessor:
                 if file_name.endswith('.txt'):
                     file_path = gtfs_dir / file_name
                     try:
-                        # Read the file
-                        df = pd.read_csv(file_path)
+                        # Read the file with low_memory=False to avoid dtype warnings
+                        df = pd.read_csv(file_path, low_memory=False)
                         # Store in dictionary with file name as key (without .txt)
                         feed[file_name[:-4]] = df
                     except Exception as e:
@@ -208,10 +210,11 @@ class GTFSProcessor:
                 # 2 = Wheelchair boarding is not possible at this stop
                 
                 # Convert to more readable values
-                stops['wheelchair_accessible'] = stops['wheelchair_boarding'].map({
-                    0: 'unknown',
-                    1: 'yes',
-                    2: 'no'
+                # Handle both integer and float values
+                stops['wheelchair_accessible'] = stops['wheelchair_boarding'].astype(float).map({
+                    0.0: 'unknown',
+                    1.0: 'yes',
+                    2.0: 'no'
                 }).fillna('unknown')
                 
             elif accessibility:
@@ -257,6 +260,17 @@ class GTFSProcessor:
             
             # Create GeoDataFrame
             gdf = gpd.GeoDataFrame(stops, geometry=geometry, crs="EPSG:4326")
+            
+            # Ensure consistent data types for problematic columns
+            # Convert zone_id to string to handle mixed types
+            if 'zone_id' in gdf.columns:
+                gdf['zone_id'] = gdf['zone_id'].astype(str)
+            
+            # Convert other potentially problematic columns
+            problematic_cols = ['stop_url', 'parent_station', 'stop_desc']
+            for col in problematic_cols:
+                if col in gdf.columns:
+                    gdf[col] = gdf[col].astype(str)
             
             logger.info(f"Created GeoDataFrame with {len(gdf)} stops")
             return gdf
@@ -325,11 +339,37 @@ class GTFSProcessor:
             # Group by stop_id and count trips
             frequency = active_stop_times.groupby('stop_id').size().reset_index(name='trips_per_day')
             
-            # Calculate trips per hour (assuming 18-hour service day from 6am to midnight)
-            frequency['trips_per_hour'] = frequency['trips_per_day'] / 18
+            # Calculate actual service hours for each stop
+            # Convert arrival_time to hours and find service span
+            active_stop_times = active_stop_times.copy()  # Create a copy to avoid SettingWithCopyWarning
+            active_stop_times['arrival_hour'] = pd.to_numeric(
+                active_stop_times['arrival_time'].str.split(':').str[0], 
+                errors='coerce'
+            )
             
-            # Calculate average headway in minutes
-            frequency['avg_headway_minutes'] = 60 / frequency['trips_per_hour']
+            # Calculate service hours for each stop
+            service_hours = active_stop_times.groupby('stop_id')['arrival_hour'].agg([
+                ('first_service', 'min'),
+                ('last_service', 'max')
+            ]).reset_index()
+            
+            # Calculate service span (with minimum 1 hour)
+            service_hours['service_span_hours'] = (
+                service_hours['last_service'] - service_hours['first_service'] + 1
+            ).clip(lower=1)
+            
+            # Merge service hours with frequency data
+            frequency = frequency.merge(service_hours[['stop_id', 'service_span_hours']], on='stop_id', how='left')
+            
+            # Calculate trips per hour using actual service hours
+            frequency['trips_per_hour'] = frequency['trips_per_day'] / frequency['service_span_hours']
+            
+            # Calculate average headway in minutes (with safety check for zero trips)
+            frequency['avg_headway_minutes'] = np.where(
+                frequency['trips_per_hour'] > 0,
+                60 / frequency['trips_per_hour'],
+                1440  # 24 hours if no service
+            )
             
             # Merge with stops to get stop names and locations
             stops = feed['stops'].copy()

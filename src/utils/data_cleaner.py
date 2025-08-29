@@ -20,7 +20,11 @@ import logging
 from datetime import datetime
 import json
 import warnings
+import time
+import requests
+from functools import wraps
 from shapely.geometry import Point
+from typing import Dict, Any, Optional, Callable
 
 # Import project utilities
 from .spatial_utils import (
@@ -30,6 +34,7 @@ from .spatial_utils import (
 from .data_validator import DataValidator
 from .config_manager import ConfigManager
 from .data_persistence import DataPersistence
+from .data_quality import DataQualityAssessor
 
 # Import data acquisition modules
 import sys
@@ -42,6 +47,65 @@ from src.data_acquisition.osm_downloader import OSMDownloader
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+def retry_on_failure(max_retries: int = 3, delay: float = 1.0, backoff: float = 2.0):
+    """
+    Decorator to retry functions on failure with exponential backoff.
+    
+    Args:
+        max_retries: Maximum number of retry attempts
+        delay: Initial delay between retries in seconds
+        backoff: Multiplier for delay after each retry
+    """
+    def decorator(func: Callable) -> Callable:
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            last_exception = None
+            current_delay = delay
+            
+            for attempt in range(max_retries + 1):
+                try:
+                    return func(*args, **kwargs)
+                except Exception as e:
+                    last_exception = e
+                    if attempt < max_retries:
+                        logger.warning(f"Attempt {attempt + 1} failed for {func.__name__}: {e}")
+                        logger.info(f"Retrying in {current_delay:.1f} seconds...")
+                        time.sleep(current_delay)
+                        current_delay *= backoff
+                    else:
+                        logger.error(f"All {max_retries + 1} attempts failed for {func.__name__}: {e}")
+            
+            raise last_exception
+        return wrapper
+    return decorator
+
+def handle_api_failure(func: Callable) -> Callable:
+    """
+    Decorator to handle API failures gracefully.
+    
+    Args:
+        func: Function to wrap with API error handling
+    """
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        try:
+            return func(*args, **kwargs)
+        except requests.exceptions.RequestException as e:
+            logger.error(f"API request failed in {func.__name__}: {e}")
+            raise
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 429:  # Rate limit
+                logger.warning(f"Rate limit exceeded in {func.__name__}. Consider implementing rate limiting.")
+            elif e.response.status_code >= 500:  # Server error
+                logger.error(f"Server error in {func.__name__}: {e.response.status_code}")
+            else:
+                logger.error(f"HTTP error in {func.__name__}: {e.response.status_code}")
+            raise
+        except Exception as e:
+            logger.error(f"Unexpected error in {func.__name__}: {e}")
+            raise
+    return wrapper
 
 class DataCleaner:
     """Handles data fetching, cleaning, and integration for mobility analysis."""
@@ -57,6 +121,7 @@ class DataCleaner:
         self.config = ConfigManager(config_path)
         self.validator = DataValidator()
         self.persistence = DataPersistence(base_dir=self.config.processed_dir)
+        self.quality_assessor = DataQualityAssessor()
         
         # Set coordinate systems
         self.default_crs = self.config.get("crs.default", "EPSG:4326")
@@ -76,8 +141,117 @@ class DataCleaner:
         self.data_lineage = {
             'timestamp': datetime.now().isoformat(),
             'sources': {},
-            'transformations': []
+            'transformations': [],
+            'metadata': {
+                'pipeline_version': '1.0.0',
+                'run_timestamp': datetime.now().isoformat(),
+                'city': None,
+                'total_sources': 0,
+                'total_transformations': 0
+            }
         }
+        
+        # Error tracking
+        self.errors = []
+        self.warnings = []
+    
+    def add_error(self, source: str, error: str, details: Optional[Dict] = None):
+        """Add an error to the error tracking list."""
+        error_entry = {
+            'timestamp': datetime.now().isoformat(),
+            'source': source,
+            'error': error,
+            'details': details or {}
+        }
+        self.errors.append(error_entry)
+        logger.error(f"[{source}] {error}")
+    
+    def add_warning(self, source: str, warning: str, details: Optional[Dict] = None):
+        """Add a warning to the warning tracking list."""
+        warning_entry = {
+            'timestamp': datetime.now().isoformat(),
+            'source': source,
+            'warning': warning,
+            'details': details or {}
+        }
+        self.warnings.append(warning_entry)
+        logger.warning(f"[{source}] {warning}")
+    
+    def get_error_summary(self) -> Dict[str, Any]:
+        """Get a summary of all errors and warnings."""
+        return {
+            'total_errors': len(self.errors),
+            'total_warnings': len(self.warnings),
+            'errors': self.errors,
+            'warnings': self.warnings
+        }
+    
+    def handle_missing_data(self, data_type: str, fallback_strategy: str = 'skip') -> bool:
+        """
+        Handle missing data gracefully.
+        
+        Args:
+            data_type: Type of data that is missing
+            fallback_strategy: Strategy to use ('skip', 'placeholder', 'error')
+            
+        Returns:
+            True if handled successfully, False otherwise
+        """
+        if fallback_strategy == 'skip':
+            self.add_warning('data_cleaner', f"Missing {data_type} data - skipping")
+            return True
+        elif fallback_strategy == 'placeholder':
+            self.add_warning('data_cleaner', f"Missing {data_type} data - using placeholder")
+            # Create placeholder data based on type
+            if data_type == 'transit':
+                self.transit_data = self._create_placeholder_transit_data()
+            elif data_type == 'census':
+                self.census_data = self._create_placeholder_census_data()
+            return True
+        elif fallback_strategy == 'error':
+            self.add_error('data_cleaner', f"Missing {data_type} data - cannot proceed")
+            return False
+        return False
+    
+    def _create_placeholder_transit_data(self) -> gpd.GeoDataFrame:
+        """Create placeholder transit data when real data is unavailable."""
+        from shapely.geometry import Point
+        
+        placeholder_data = gpd.GeoDataFrame(
+            {
+                'stop_id': ['placeholder_1', 'placeholder_2'],
+                'stop_name': ['Placeholder Stop 1', 'Placeholder Stop 2'],
+                'stop_lat': [47.6062, 47.6097],
+                'stop_lon': [-122.3321, -122.3331],
+                'wheelchair_accessible': ['yes', 'yes'],
+                'trips_per_day': [10, 10],
+                'agency_name': ['placeholder_agency', 'placeholder_agency']
+            },
+            geometry=[Point(-122.3321, 47.6062), Point(-122.3331, 47.6097)],
+            crs="EPSG:4326"
+        )
+        return placeholder_data
+    
+    def _create_placeholder_census_data(self) -> gpd.GeoDataFrame:
+        """Create placeholder census data when real data is unavailable."""
+        from shapely.geometry import Polygon
+        
+        # Create a simple polygon for Seattle area
+        polygon = Polygon([
+            (-122.5, 47.5), (-122.3, 47.5), (-122.3, 47.7), (-122.5, 47.7), (-122.5, 47.5)
+        ])
+        
+        placeholder_data = gpd.GeoDataFrame(
+            {
+                'geoid': ['53033000000'],
+                'total_population': [1000],
+                'median_household_income': [50000],
+                'area_sqkm': [100.0]
+            },
+            geometry=[polygon],
+            crs="EPSG:4326"
+        )
+        return placeholder_data
     
     def fetch_all_data(self, city_name, force_refresh=False):
         """
@@ -163,10 +337,18 @@ class DataCleaner:
             self._add_lineage('census', 'api', str(file_path), datetime.now().isoformat(), {'state': state, 'county': county})
             
             logger.info(f"Census data processed: {len(self.census_data)} tracts")
+            
+            # Assess data quality
+            self.assess_data_quality('census', self.census_data)
+            
             return True
             
         except Exception as e:
-            logger.error(f"Failed to fetch Census data: {e}")
+            self.add_error('census_fetch', f"Failed to fetch Census data: {e}", {
+                'state': state,
+                'county': county,
+                'error_type': type(e).__name__
+            })
             return False
     
     def fetch_transit_data(self, city_name, force_refresh=False):
@@ -193,19 +375,46 @@ class DataCleaner:
             # Get city config
             city_config = self.config.get_city_config(city_name)
             if not city_config:
-                logger.error(f"City configuration not found for {city_name}")
+                self.add_error('transit_fetch', f"City configuration not found for {city_name}")
                 return False
             
-            # Check for GTFS data
-            gtfs_dir = self.config.raw_dir / "gtfs" / city_name.lower().replace(" ", "_")
-            if not gtfs_dir.exists() or not any(gtfs_dir.iterdir()):
-                logger.warning(f"No GTFS data found for {city_name}, creating placeholder data")
-                self.transit_data = self._create_placeholder_transit_data(city_config)
-                self._add_lineage('transit', 'placeholder', None, datetime.now().isoformat(), {'city': city_name})
-            else:
-                logger.info(f"Processing GTFS data from {gtfs_dir}")
-                self.transit_data = self._process_gtfs_data(gtfs_dir)
-                self._add_lineage('transit', 'gtfs', str(gtfs_dir), datetime.now().isoformat(), {'city': city_name})
+            # Check for GTFS data - look for agency directories
+            gtfs_base_dir = self.config.raw_dir / "gtfs"
+            if not gtfs_base_dir.exists():
+                self.add_error('transit_fetch', f"GTFS base directory not found: {gtfs_base_dir}")
+                return False
+            
+            # Look for agency directories (king_county_metro, sound_transit, etc.)
+            agency_dirs = [d for d in gtfs_base_dir.iterdir() if d.is_dir() and any(d.glob("*.txt"))]
+            
+            if not agency_dirs:
+                self.add_error('transit_fetch', f"No GTFS agency directories found in {gtfs_base_dir}")
+                return False
+            
+            logger.info(f"Found GTFS data for {len(agency_dirs)} agencies: {[d.name for d in agency_dirs]}")
+            
+            # Process all agencies and combine their data
+            all_transit_data = []
+            for agency_dir in agency_dirs:
+                try:
+                    logger.info(f"Processing GTFS data from {agency_dir}")
+                    agency_data = self._process_gtfs_data(agency_dir)
+                    if agency_data is not None and not agency_data.empty:
+                        # Add agency identifier
+                        agency_data['agency_name'] = agency_dir.name
+                        all_transit_data.append(agency_data)
+                        logger.info(f"Processed {len(agency_data)} stops from {agency_dir.name}")
+                except Exception as e:
+                    logger.warning(f"Failed to process {agency_dir.name}: {e}")
+            
+            if not all_transit_data:
+                logger.error("No transit data could be processed from any agency")
+                return False
+            
+            # Combine all agency data
+            self.transit_data = pd.concat(all_transit_data, ignore_index=True)
+            self._add_lineage('transit', 'gtfs', str(gtfs_base_dir), datetime.now().isoformat(), 
+                            {'city': city_name, 'agencies': [d.name for d in agency_dirs]})
             
             # Save processed data
             file_path = self.persistence.save_dataframe(
@@ -218,6 +427,10 @@ class DataCleaner:
             )
             
             logger.info(f"Transit data processed: {len(self.transit_data)} stops")
+            
+            # Assess data quality
+            self.assess_data_quality('transit', self.transit_data)
+            
             return True
             
         except Exception as e:
@@ -263,10 +476,19 @@ class DataCleaner:
             self._add_lineage('osm', 'api', None, datetime.now().isoformat(), {'place': place_name})
             
             logger.info("OSM data fetched and processed")
+            
+            # Assess data quality for OSM datasets
+            for osm_type, osm_data in self.osm_data.items():
+                if osm_data is not None:
+                    self.assess_data_quality(f'osm_{osm_type}', osm_data)
+            
             return True
             
         except Exception as e:
-            logger.error(f"Failed to fetch OSM data: {e}")
+            self.add_error('osm_fetch', f"Failed to fetch OSM data: {e}", {
+                'place_name': place_name,
+                'error_type': type(e).__name__
+            })
             return False
     
     def integrate_data(self, city_name):
@@ -288,14 +510,21 @@ class DataCleaner:
             
             # Standardize and clean data
             census_data, transit_data, sidewalks, amenities = self._prepare_data_for_integration()
+            self._add_transformation('data_preparation', 'prepared_datasets', 'Prepared and standardized all datasets')
             
             # Calculate mobility metrics
             census_data = self._calculate_transit_metrics(census_data, transit_data)
+            self._add_transformation('transit_metrics', 'transit_scores', 'Calculated transit access metrics')
+            
             census_data = self._calculate_sidewalk_metrics(census_data, sidewalks)
+            self._add_transformation('sidewalk_metrics', 'sidewalk_scores', 'Calculated sidewalk quality metrics')
+            
             census_data = self._calculate_amenity_metrics(census_data, amenities)
+            self._add_transformation('amenity_metrics', 'amenity_scores', 'Calculated amenity proximity metrics')
             
             # Calculate mobility index
             census_data = self._calculate_mobility_index(census_data)
+            self._add_transformation('mobility_index_calculation', 'mobility_scores', 'Calculated composite Mobility Accessibility Index')
             
             # Store and save results
             self._store_integrated_data(census_data, transit_data, sidewalks, amenities)
@@ -316,10 +545,24 @@ class DataCleaner:
             self._add_transformation('data_integration', str(integrated_path))
             
             logger.info(f"Data integration complete for {city_name}")
+            
+            # Generate comprehensive quality report
+            quality_report = self.generate_quality_report()
+            self._add_transformation('quality_assessment', 'quality_report', 'Generated comprehensive quality assessment report')
+            logger.info(f"Overall data quality score: {quality_report.get('overall_quality_score', 0.0):.2f}")
+            
+            # Save error report if there are any errors or warnings
+            if self.errors or self.warnings:
+                self.save_error_report()
+                logger.info(f"Error report saved: {len(self.errors)} errors, {len(self.warnings)} warnings")
+            
             return self.integrated_data
             
         except Exception as e:
-            logger.error(f"Failed to integrate data: {e}")
+            self.add_error('data_integration', f"Failed to integrate data: {e}", {
+                'city_name': city_name,
+                'error_type': type(e).__name__
+            })
             return None
     
     def save_data_lineage(self, output_file=None):
@@ -335,6 +578,11 @@ class DataCleaner:
         if output_file is None:
             output_file = self.config.processed_dir / "data_lineage.json"
         
+        # Update metadata with final counts
+        self.data_lineage['metadata']['total_sources'] = len(self.data_lineage['sources'])
+        self.data_lineage['metadata']['total_transformations'] = len(self.data_lineage['transformations'])
+        self.data_lineage['metadata']['run_timestamp'] = datetime.now().isoformat()
+        
         try:
             with open(output_file, 'w') as f:
                 json.dump(self.data_lineage, f, indent=2)
@@ -345,6 +593,31 @@ class DataCleaner:
         except Exception as e:
             logger.error(f"Failed to save data lineage: {e}")
             return self.data_lineage
+    
+    def save_error_report(self, output_file=None):
+        """
+        Save error and warning report.
+        
+        Args:
+            output_file: Path to save error report
+            
+        Returns:
+            Path to saved file
+        """
+        if output_file is None:
+            output_file = self.config.processed_dir / "error_report.json"
+        
+        try:
+            error_summary = self.get_error_summary()
+            with open(output_file, 'w') as f:
+                json.dump(error_summary, f, indent=2)
+            
+            logger.info(f"Saved error report to {output_file}")
+            return output_file
+            
+        except Exception as e:
+            logger.error(f"Failed to save error report: {e}")
+            return None
     
     def create_basic_visualization(self, output_dir=None):
         """
@@ -435,30 +708,6 @@ class DataCleaner:
             return []
     
     # Helper methods
-    def _create_placeholder_transit_data(self, city_config):
-        """Create placeholder transit data when GTFS is not available."""
-        if 'bbox' in city_config:
-            center_lon = (city_config['bbox'][0] + city_config['bbox'][2]) / 2
-            center_lat = (city_config['bbox'][1] + city_config['bbox'][3]) / 2
-        else:
-            center_lon, center_lat = -122.3321, 47.6062  # Seattle center
-        
-        return gpd.GeoDataFrame(
-            {
-                'stop_id': ['sample1', 'sample2', 'sample3'],
-                'stop_name': ['Sample Stop 1', 'Sample Stop 2', 'Sample Stop 3'],
-                'wheelchair_accessible': ['yes', 'no', 'unknown'],
-                'trips_per_day': [100, 50, 25],
-                'trips_per_hour': [6, 3, 1.5],
-                'avg_headway_minutes': [10, 20, 40]
-            },
-            geometry=[
-                Point(center_lon - 0.01, center_lat - 0.01),
-                Point(center_lon + 0.01, center_lat - 0.01),
-                Point(center_lon, center_lat + 0.01)
-            ],
-            crs=self.default_crs
-        )
     
     def _process_gtfs_data(self, gtfs_dir):
         """Process GTFS data and extract stops with frequency information."""
@@ -575,30 +824,43 @@ class DataCleaner:
         )
         
         if not transit_per_tract.empty:
-            # Count stops per tract
-            stops_per_tract = transit_per_tract.groupby('geoid').size().reset_index(name='stop_count')
+            # Count stops per tract and calculate service metrics
+            transit_metrics = transit_per_tract.groupby('geoid').agg({
+                'stop_id': 'count',  # Count of stops
+                'trips_per_day': 'sum',  # Total trips per day
+                'trips_per_hour': 'sum',  # Total trips per hour
+                'avg_headway_minutes': 'mean',  # Average headway
+                'wheelchair_accessible': lambda x: (x == 'yes').sum()  # Count accessible stops
+            }).reset_index()
             
-            # Calculate density
-            stops_per_tract = stops_per_tract.merge(
+            # Rename columns
+            transit_metrics.columns = ['geoid', 'stop_count', 'total_trips_per_day', 'total_trips_per_hour', 'avg_headway_minutes', 'accessible_stop_count']
+            
+            # Calculate density and accessibility percentage
+            transit_metrics = transit_metrics.merge(
                 census_data[['geoid', 'area_sqkm']],
                 on='geoid',
                 how='left'
             )
-            stops_per_tract['stops_per_sqkm'] = stops_per_tract['stop_count'] / stops_per_tract['area_sqkm']
+            transit_metrics['stops_per_sqkm'] = transit_metrics['stop_count'] / transit_metrics['area_sqkm']
+            transit_metrics['pct_accessible_stops'] = (transit_metrics['accessible_stop_count'] / transit_metrics['stop_count']) * 100
             
             # Merge back to census data
             census_data = census_data.merge(
-                stops_per_tract[['geoid', 'stop_count', 'stops_per_sqkm']],
+                transit_metrics[['geoid', 'stop_count', 'stops_per_sqkm', 'total_trips_per_day', 'total_trips_per_hour', 'avg_headway_minutes', 'accessible_stop_count', 'pct_accessible_stops']],
                 on='geoid',
                 how='left'
             )
             
             # Fill NaN values
-            census_data['stop_count'] = census_data['stop_count'].fillna(0)
-            census_data['stops_per_sqkm'] = census_data['stops_per_sqkm'].fillna(0)
+            transit_cols = ['stop_count', 'stops_per_sqkm', 'total_trips_per_day', 'total_trips_per_hour', 'avg_headway_minutes', 'accessible_stop_count', 'pct_accessible_stops']
+            for col in transit_cols:
+                census_data[col] = census_data[col].fillna(0)
         else:
-            census_data['stop_count'] = 0
-            census_data['stops_per_sqkm'] = 0
+            # No transit data - set all transit metrics to 0
+            transit_cols = ['stop_count', 'stops_per_sqkm', 'total_trips_per_day', 'total_trips_per_hour', 'avg_headway_minutes', 'accessible_stop_count', 'pct_accessible_stops']
+            for col in transit_cols:
+                census_data[col] = 0
         
         return census_data
     
@@ -681,6 +943,81 @@ class DataCleaner:
         
         return census_data
     
+    def assess_data_quality(self, dataset_name: str, data: gpd.GeoDataFrame) -> Dict[str, Any]:
+        """
+        Assess quality of a dataset and add to lineage.
+        
+        Args:
+            dataset_name: Name of the dataset
+            data: GeoDataFrame to assess
+            
+        Returns:
+            Quality metrics dictionary
+        """
+        logger.info(f"Assessing quality for {dataset_name}")
+        
+        # Assess quality based on dataset type
+        if dataset_name == 'census':
+            metrics = self.quality_assessor.assess_census_data_quality(data)
+        elif dataset_name == 'transit':
+            metrics = self.quality_assessor.assess_transit_data_quality(data)
+        elif dataset_name == 'mobility_index':
+            metrics = self.quality_assessor.assess_mobility_index_quality(data)
+        elif dataset_name.startswith('osm_'):
+            osm_type = dataset_name.replace('osm_', '')
+            metrics = self.quality_assessor.assess_osm_data_quality(data, osm_type)
+        else:
+            # Generic assessment
+            metrics = {
+                'dataset': dataset_name,
+                'timestamp': datetime.now().isoformat(),
+                'overall_score': 0.0,
+                'completeness': {'total_rows': len(data) if data is not None else 0}
+            }
+        
+        # Add quality metrics to lineage
+        self._add_lineage(dataset_name, 'quality_assessment', None, datetime.now().isoformat(), 
+                         {'quality_score': metrics.get('overall_score', 0.0)})
+        
+        return metrics
+    
+    def generate_quality_report(self) -> Dict[str, Any]:
+        """
+        Generate comprehensive quality report for all datasets.
+        
+        Returns:
+            Quality report dictionary
+        """
+        logger.info("Generating comprehensive quality report")
+        
+        all_metrics = {}
+        
+        # Assess quality for each dataset
+        if self.census_data is not None:
+            all_metrics['census'] = self.assess_data_quality('census', self.census_data)
+        
+        if self.transit_data is not None:
+            all_metrics['transit'] = self.assess_data_quality('transit', self.transit_data)
+        
+        if 'census_with_mobility' in self.integrated_data:
+            all_metrics['mobility_index'] = self.assess_data_quality('mobility_index', self.integrated_data['census_with_mobility'])
+        
+        for osm_type, osm_data in self.osm_data.items():
+            if osm_data is not None:
+                all_metrics[f'osm_{osm_type}'] = self.assess_data_quality(f'osm_{osm_type}', osm_data)
+        
+        # Generate comprehensive report
+        report = self.quality_assessor.generate_quality_report(all_metrics)
+        
+        # Save quality report
+        report_file = self.config.processed_dir / "quality_report.json"
+        with open(report_file, 'w') as f:
+            json.dump(report, f, indent=2)
+        
+        logger.info(f"Quality report saved to {report_file}")
+        
+        return report
+    
     def _calculate_mobility_index(self, census_data):
         """Calculate the Mobility Accessibility Index."""
         logger.info("Calculating Mobility Accessibility Index")
@@ -694,24 +1031,89 @@ class DataCleaner:
         })
         
         # Calculate component scores (0-100 scale)
-        score_columns = [
-            ('stops_per_sqkm', 'transit_access_score'),
-            ('sidewalk_km_per_sqkm', 'sidewalk_quality_score'),
-            ('amenities_per_sqkm', 'amenity_proximity_score')
-        ]
         
-        for input_col, score_col in score_columns:
-            if input_col in census_data.columns:
-                max_val = census_data[input_col].max()
-                if max_val > 0:
-                    census_data[score_col] = (census_data[input_col] / max_val) * 100
-                else:
-                    census_data[score_col] = 0
+        # Enhanced transit access score - consider multiple transit metrics
+        transit_score = 0
+        if 'stops_per_sqkm' in census_data.columns:
+            # Stop density component (40% weight)
+            max_stops = census_data['stops_per_sqkm'].max()
+            if max_stops > 0:
+                stop_density_score = (census_data['stops_per_sqkm'] / max_stops) * 40
             else:
-                census_data[score_col] = 0
+                stop_density_score = 0
+            
+            # Service frequency component (30% weight)
+            if 'total_trips_per_day' in census_data.columns:
+                max_trips = census_data['total_trips_per_day'].max()
+                if max_trips > 0:
+                    frequency_score = (census_data['total_trips_per_day'] / max_trips) * 30
+                else:
+                    frequency_score = 0
+            else:
+                frequency_score = 0
+            
+            # Accessibility component (20% weight)
+            if 'accessible_stops_per_sqkm' in census_data.columns:
+                max_accessible = census_data['accessible_stops_per_sqkm'].max()
+                if max_accessible > 0:
+                    accessibility_score = (census_data['accessible_stops_per_sqkm'] / max_accessible) * 20
+                else:
+                    accessibility_score = 0
+            else:
+                accessibility_score = 0
+            
+            # Service quality component (10% weight) - inverse of headway (shorter headway = better)
+            if 'avg_headway_minutes' in census_data.columns:
+                # Normalize headway (lower is better, so invert)
+                min_headway = census_data['avg_headway_minutes'].min()
+                max_headway = census_data['avg_headway_minutes'].max()
+                if max_headway > min_headway:
+                    headway_score = ((max_headway - census_data['avg_headway_minutes']) / (max_headway - min_headway)) * 10
+                else:
+                    headway_score = 0
+            else:
+                headway_score = 0
+            
+            # Combine all transit components
+            transit_score = stop_density_score + frequency_score + accessibility_score + headway_score
+            
+            # Store individual components for analysis
+            census_data['transit_density_score'] = stop_density_score
+            census_data['transit_frequency_score'] = frequency_score
+            census_data['transit_accessibility_score'] = accessibility_score
+            census_data['transit_quality_score'] = headway_score
         
-        # Street connectivity score (placeholder - uses amenity score for now)
-        census_data['street_connectivity_score'] = census_data['amenity_proximity_score']
+        census_data['transit_access_score'] = transit_score
+        
+        # Sidewalk quality score
+        if 'sidewalk_km_per_sqkm' in census_data.columns:
+            max_sidewalk = census_data['sidewalk_km_per_sqkm'].max()
+            if max_sidewalk > 0:
+                census_data['sidewalk_quality_score'] = (census_data['sidewalk_km_per_sqkm'] / max_sidewalk) * 100
+            else:
+                census_data['sidewalk_quality_score'] = 0
+        else:
+            census_data['sidewalk_quality_score'] = 0
+        
+        # Amenity proximity score
+        if 'amenities_per_sqkm' in census_data.columns:
+            max_amenities = census_data['amenities_per_sqkm'].max()
+            if max_amenities > 0:
+                census_data['amenity_proximity_score'] = (census_data['amenities_per_sqkm'] / max_amenities) * 100
+            else:
+                census_data['amenity_proximity_score'] = 0
+        else:
+            census_data['amenity_proximity_score'] = 0
+        
+        # Street connectivity score - use intersection density or network connectivity
+        # For now, use a combination of sidewalk density and amenity density as proxy
+        if 'sidewalk_km_per_sqkm' in census_data.columns and 'amenities_per_sqkm' in census_data.columns:
+            # Normalize both metrics and take average
+            sidewalk_norm = census_data['sidewalk_km_per_sqkm'] / census_data['sidewalk_km_per_sqkm'].max() if census_data['sidewalk_km_per_sqkm'].max() > 0 else 0
+            amenity_norm = census_data['amenities_per_sqkm'] / census_data['amenities_per_sqkm'].max() if census_data['amenities_per_sqkm'].max() > 0 else 0
+            census_data['street_connectivity_score'] = ((sidewalk_norm + amenity_norm) / 2) * 100
+        else:
+            census_data['street_connectivity_score'] = 0
         
         # Calculate weighted MAI
         census_data['mobility_access_index'] = (
@@ -720,6 +1122,11 @@ class DataCleaner:
             (weights['amenity_proximity'] * census_data['amenity_proximity_score']) +
             (weights['street_connectivity'] * census_data['street_connectivity_score'])
         )
+        
+        # Normalize to 0-1 range
+        max_index = census_data['mobility_access_index'].max()
+        if max_index > 0:
+            census_data['mobility_access_index'] = census_data['mobility_access_index'] / max_index
         
         return census_data
     

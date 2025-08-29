@@ -431,7 +431,7 @@ class DataPersistence:
         # Generate unique ID
         dataset_id = str(uuid.uuid4())
         
-        # Basic dataset info
+        # Basic dataset info with comprehensive numpy type conversion
         info = {
             'id': dataset_id,
             'name': name,
@@ -439,8 +439,8 @@ class DataPersistence:
             'file_path': str(file_path),
             'format': format,
             'timestamp': datetime.now().isoformat(),
-            'row_count': int(len(df)),  # Ensure it's a regular int
-            'column_count': int(len(df.columns)),  # Ensure it's a regular int
+            'row_count': self._convert_numpy_types(len(df)),  # Ensure it's a regular int
+            'column_count': self._convert_numpy_types(len(df.columns)),  # Ensure it's a regular int
             'columns': list(df.columns),
             'version': self._get_next_version(name, category)
         }
@@ -449,15 +449,21 @@ class DataPersistence:
         if isinstance(df, gpd.GeoDataFrame):
             info['is_geo'] = True
             info['crs'] = str(df.crs)
-            # Convert numpy int64 to regular int for JSON serialization
+            # Convert geometry counts with comprehensive numpy type conversion
             geometry_counts = df.geometry.geom_type.value_counts()
-            info['geometry_type'] = {k: int(v) for k, v in geometry_counts.items()}
+            info['geometry_type'] = {k: self._convert_numpy_types(v) for k, v in geometry_counts.items()}
             
-            # Add bounding box if available
+            # Add bounding box if available with proper type conversion
             try:
                 minx, miny, maxx, maxy = df.total_bounds
-                info['bounds'] = [float(minx), float(miny), float(maxx), float(maxy)]
-            except:
+                info['bounds'] = [
+                    self._convert_numpy_types(minx), 
+                    self._convert_numpy_types(miny), 
+                    self._convert_numpy_types(maxx), 
+                    self._convert_numpy_types(maxy)
+                ]
+            except Exception as e:
+                logger.warning(f"Could not add bounds to metadata: {e}")
                 pass
         else:
             info['is_geo'] = False
@@ -495,3 +501,31 @@ class DataPersistence:
         
         # Return next version
         return max(versions) + 1 if versions else 1
+    
+    def _convert_numpy_types(self, value):
+        """
+        Convert numpy types to Python native types for JSON serialization.
+        
+        Args:
+            value: Value that might be a numpy type
+            
+        Returns:
+            Python native type value
+        """
+        import numpy as np
+        
+        # Handle numpy types
+        if isinstance(value, np.integer):
+            return int(value)
+        elif isinstance(value, np.floating):
+            return float(value)
+        elif isinstance(value, np.bool_):
+            return bool(value)
+        elif isinstance(value, np.ndarray):
+            return value.tolist()
+        elif isinstance(value, (list, tuple)):
+            return [self._convert_numpy_types(item) for item in value]
+        elif isinstance(value, dict):
+            return {k: self._convert_numpy_types(v) for k, v in value.items()}
+        else:
+            return value
