@@ -44,6 +44,9 @@ from src.data_acquisition.fetch_census_data import CensusFetcher
 from src.data_acquisition.gtfs_processor import GTFSProcessor
 from src.data_acquisition.osm_downloader import OSMDownloader
 
+# Import analysis modules
+from src.analysis.transit_score import TransitScoreCalculator, calculate_comprehensive_transit_score
+
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -812,8 +815,50 @@ class DataCleaner:
         return census_data, transit_data, sidewalks, amenities
     
     def _calculate_transit_metrics(self, census_data, transit_data):
-        """Calculate transit access metrics per census tract."""
-        logger.info("Calculating transit metrics")
+        """Calculate transit access metrics per census tract using new scoring system."""
+        logger.info("Calculating comprehensive transit metrics using new scoring system")
+        
+        try:
+            # Initialize transit score calculator
+            transit_calculator = TransitScoreCalculator(
+                max_walking_distance=self.config.get("processing.max_distance_m", 1000),
+                weights=self.config.get("processing.transit_weights", {
+                    'distance': 0.4,
+                    'frequency': 0.3,
+                    'accessibility': 0.2,
+                    'coverage': 0.1
+                })
+            )
+            
+            # Prepare service data from transit stops
+            service_data = None
+            if 'trips_per_day' in transit_data.columns:
+                service_cols = ['stop_id', 'trips_per_day', 'trips_per_hour', 'avg_headway_minutes']
+                available_cols = ['stop_id'] + [col for col in service_cols[1:] if col in transit_data.columns]
+                service_data = transit_data[available_cols].copy()
+            
+            # Calculate comprehensive transit scores
+            census_with_scores = transit_calculator.calculate_comprehensive_transit_score(
+                neighborhoods=census_data,
+                transit_stops=transit_data,
+                service_data=service_data,
+                distance_method='euclidean'
+            )
+            
+            # Also calculate the legacy metrics for backward compatibility
+            census_with_scores = self._calculate_legacy_transit_metrics(census_with_scores, transit_data)
+            
+            logger.info("Transit metrics calculation complete using new scoring system")
+            return census_with_scores
+            
+        except Exception as e:
+            logger.error(f"Error calculating transit metrics with new system: {e}")
+            logger.info("Falling back to legacy transit metrics calculation")
+            return self._calculate_legacy_transit_metrics(census_data, transit_data)
+    
+    def _calculate_legacy_transit_metrics(self, census_data, transit_data):
+        """Calculate legacy transit metrics for backward compatibility."""
+        logger.info("Calculating legacy transit metrics")
         
         # Join transit stops to census tracts
         transit_per_tract = safe_spatial_join(
@@ -1032,58 +1077,65 @@ class DataCleaner:
         
         # Calculate component scores (0-100 scale)
         
-        # Enhanced transit access score - consider multiple transit metrics
-        transit_score = 0
-        if 'stops_per_sqkm' in census_data.columns:
-            # Stop density component (40% weight)
-            max_stops = census_data['stops_per_sqkm'].max()
-            if max_stops > 0:
-                stop_density_score = (census_data['stops_per_sqkm'] / max_stops) * 40
-            else:
-                stop_density_score = 0
-            
-            # Service frequency component (30% weight)
-            if 'total_trips_per_day' in census_data.columns:
-                max_trips = census_data['total_trips_per_day'].max()
-                if max_trips > 0:
-                    frequency_score = (census_data['total_trips_per_day'] / max_trips) * 30
+        # Use new comprehensive transit access score if available, otherwise fall back to legacy calculation
+        if 'transit_access_score' in census_data.columns:
+            logger.info("Using comprehensive transit access scores from new scoring system")
+            # The new scoring system already provides a 0-100 scale score
+            transit_score = census_data['transit_access_score']
+        else:
+            logger.info("Using legacy transit score calculation")
+            # Enhanced transit access score - consider multiple transit metrics
+            transit_score = 0
+            if 'stops_per_sqkm' in census_data.columns:
+                # Stop density component (40% weight)
+                max_stops = census_data['stops_per_sqkm'].max()
+                if max_stops > 0:
+                    stop_density_score = (census_data['stops_per_sqkm'] / max_stops) * 40
+                else:
+                    stop_density_score = 0
+                
+                # Service frequency component (30% weight)
+                if 'total_trips_per_day' in census_data.columns:
+                    max_trips = census_data['total_trips_per_day'].max()
+                    if max_trips > 0:
+                        frequency_score = (census_data['total_trips_per_day'] / max_trips) * 30
+                    else:
+                        frequency_score = 0
                 else:
                     frequency_score = 0
-            else:
-                frequency_score = 0
-            
-            # Accessibility component (20% weight)
-            if 'accessible_stops_per_sqkm' in census_data.columns:
-                max_accessible = census_data['accessible_stops_per_sqkm'].max()
-                if max_accessible > 0:
-                    accessibility_score = (census_data['accessible_stops_per_sqkm'] / max_accessible) * 20
+                
+                # Accessibility component (20% weight)
+                if 'accessible_stops_per_sqkm' in census_data.columns:
+                    max_accessible = census_data['accessible_stops_per_sqkm'].max()
+                    if max_accessible > 0:
+                        accessibility_score = (census_data['accessible_stops_per_sqkm'] / max_accessible) * 20
+                    else:
+                        accessibility_score = 0
                 else:
                     accessibility_score = 0
-            else:
-                accessibility_score = 0
-            
-            # Service quality component (10% weight) - inverse of headway (shorter headway = better)
-            if 'avg_headway_minutes' in census_data.columns:
-                # Normalize headway (lower is better, so invert)
-                min_headway = census_data['avg_headway_minutes'].min()
-                max_headway = census_data['avg_headway_minutes'].max()
-                if max_headway > min_headway:
-                    headway_score = ((max_headway - census_data['avg_headway_minutes']) / (max_headway - min_headway)) * 10
+                
+                # Service quality component (10% weight) - inverse of headway (shorter headway = better)
+                if 'avg_headway_minutes' in census_data.columns:
+                    # Normalize headway (lower is better, so invert)
+                    min_headway = census_data['avg_headway_minutes'].min()
+                    max_headway = census_data['avg_headway_minutes'].max()
+                    if max_headway > min_headway:
+                        headway_score = ((max_headway - census_data['avg_headway_minutes']) / (max_headway - min_headway)) * 10
+                    else:
+                        headway_score = 0
                 else:
                     headway_score = 0
-            else:
-                headway_score = 0
+                
+                # Combine all transit components
+                transit_score = stop_density_score + frequency_score + accessibility_score + headway_score
+                
+                # Store individual components for analysis
+                census_data['transit_density_score'] = stop_density_score
+                census_data['transit_frequency_score'] = frequency_score
+                census_data['transit_accessibility_score'] = accessibility_score
+                census_data['transit_quality_score'] = headway_score
             
-            # Combine all transit components
-            transit_score = stop_density_score + frequency_score + accessibility_score + headway_score
-            
-            # Store individual components for analysis
-            census_data['transit_density_score'] = stop_density_score
-            census_data['transit_frequency_score'] = frequency_score
-            census_data['transit_accessibility_score'] = accessibility_score
-            census_data['transit_quality_score'] = headway_score
-        
-        census_data['transit_access_score'] = transit_score
+            census_data['transit_access_score'] = transit_score
         
         # Sidewalk quality score
         if 'sidewalk_km_per_sqkm' in census_data.columns:

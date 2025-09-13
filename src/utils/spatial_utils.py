@@ -114,9 +114,9 @@ def safe_spatial_join(left_gdf, right_gdf, how="inner", predicate="intersects", 
         # Return appropriate fallback based on join type
         return left_gdf if how == "left" else gpd.GeoDataFrame(geometry=[], crs=left_crs)
 
-def calculate_distances(origin_gdf, destination_gdf, max_distance=None):
+def calculate_distances(origin_gdf, destination_gdf, max_distance=None, method='nearest'):
     """
-    Find the distance from each origin point to its nearest destination.
+    Find the distance from each origin point to destinations using various methods.
     
     This is useful for things like "how far is the nearest bus stop from each census tract?"
     We use a projected coordinate system for accurate distance calculations.
@@ -125,9 +125,10 @@ def calculate_distances(origin_gdf, destination_gdf, max_distance=None):
         origin_gdf: Points we're measuring FROM
         destination_gdf: Points we're measuring TO
         max_distance: Optional maximum distance to consider (meters)
+        method: Distance calculation method ('nearest', 'multiple', 'weighted')
         
     Returns:
-        GeoDataFrame with distance to nearest destination added
+        GeoDataFrame with distance metrics added
     """
     # Handle empty inputs
     if origin_gdf is None or origin_gdf.empty:
@@ -155,27 +156,16 @@ def calculate_distances(origin_gdf, destination_gdf, max_distance=None):
         result['nearest_dist'] = float('inf')
         result['nearest_id'] = None
         
-        # For each origin point, find the closest destination
-        for idx, origin in origin_proj.iterrows():
-            # Calculate distance to all destinations
-            distances = dest_proj.geometry.distance(origin.geometry)
-            
-            # Find the minimum distance and its index
-            if not distances.empty:
-                min_idx = distances.idxmin()
-                min_dist = distances.min()
-                
-                # Apply distance filter if specified
-                if max_distance is not None and min_dist > max_distance:
-                    min_dist = float('inf')
-                    min_idx = None
-            else:
-                min_dist = float('inf')
-                min_idx = None
-            
-            # Store the results
-            result.loc[idx, 'nearest_dist'] = min_dist
-            result.loc[idx, 'nearest_id'] = min_idx
+        # Calculate distances based on method
+        if method == 'nearest':
+            result = _calculate_nearest_distances(origin_proj, dest_proj, result, max_distance)
+        elif method == 'multiple':
+            result = _calculate_multiple_distances(origin_proj, dest_proj, result, max_distance)
+        elif method == 'weighted':
+            result = _calculate_weighted_distances(origin_proj, dest_proj, result, max_distance)
+        else:
+            logger.warning(f"Unknown method '{method}', using 'nearest'")
+            result = _calculate_nearest_distances(origin_proj, dest_proj, result, max_distance)
         
         logger.info("Distance calculations complete")
         return result
@@ -474,6 +464,123 @@ def create_grid(boundary, cell_size_km=1.0):
     except Exception as e:
         logger.error(f"Grid creation failed: {e}")
         return gpd.GeoDataFrame(geometry=[], crs=crs)
+
+def _calculate_nearest_distances(origin_proj, dest_proj, result, max_distance):
+    """Calculate distance to nearest destination for each origin."""
+    for idx, origin in origin_proj.iterrows():
+        # Calculate distance to all destinations
+        distances = dest_proj.geometry.distance(origin.geometry)
+        
+        # Find the minimum distance and its index
+        if not distances.empty:
+            min_idx = distances.idxmin()
+            min_dist = distances.min()
+            
+            # Apply distance filter if specified
+            if max_distance is not None and min_dist > max_distance:
+                min_dist = float('inf')
+                min_idx = None
+        else:
+            min_dist = float('inf')
+            min_idx = None
+        
+        # Store the results
+        result.loc[idx, 'nearest_dist'] = min_dist
+        result.loc[idx, 'nearest_id'] = min_idx
+    
+    return result
+
+def _calculate_multiple_distances(origin_proj, dest_proj, result, max_distance):
+    """Calculate distances to multiple destinations within range."""
+    # Add columns for multiple distance metrics
+    result['nearest_dist'] = float('inf')
+    result['nearest_id'] = None
+    result['destinations_within_range'] = 0
+    result['avg_dist_to_destinations'] = float('inf')
+    
+    for idx, origin in origin_proj.iterrows():
+        # Calculate distance to all destinations
+        distances = dest_proj.geometry.distance(origin.geometry)
+        
+        if not distances.empty:
+            # Nearest destination
+            min_idx = distances.idxmin()
+            min_dist = distances.min()
+            result.loc[idx, 'nearest_dist'] = min_dist
+            result.loc[idx, 'nearest_id'] = min_idx
+            
+            # Count destinations within range
+            if max_distance is not None:
+                within_range = distances[distances <= max_distance]
+                result.loc[idx, 'destinations_within_range'] = len(within_range)
+                
+                # Average distance to destinations within range
+                if len(within_range) > 0:
+                    result.loc[idx, 'avg_dist_to_destinations'] = within_range.mean()
+                else:
+                    result.loc[idx, 'avg_dist_to_destinations'] = float('inf')
+            else:
+                result.loc[idx, 'destinations_within_range'] = len(distances)
+                result.loc[idx, 'avg_dist_to_destinations'] = distances.mean()
+    
+    return result
+
+def _calculate_weighted_distances(origin_proj, dest_proj, result, max_distance):
+    """Calculate weighted distances based on destination importance/frequency."""
+    # Add columns for weighted distance metrics
+    result['nearest_dist'] = float('inf')
+    result['nearest_id'] = None
+    result['weighted_avg_distance'] = float('inf')
+    
+    # Check if destinations have weight column
+    weight_col = None
+    weight_cols = ['trips_per_day', 'frequency', 'weight', 'importance']
+    for col in weight_cols:
+        if col in dest_proj.columns:
+            weight_col = col
+            break
+    
+    for idx, origin in origin_proj.iterrows():
+        # Calculate distance to all destinations
+        distances = dest_proj.geometry.distance(origin.geometry)
+        
+        if not distances.empty:
+            # Nearest destination (unweighted)
+            min_idx = distances.idxmin()
+            min_dist = distances.min()
+            result.loc[idx, 'nearest_dist'] = min_dist
+            result.loc[idx, 'nearest_id'] = min_idx
+            
+            # Weighted average distance
+            if weight_col is not None:
+                # Filter by max distance if specified
+                if max_distance is not None:
+                    valid_mask = distances <= max_distance
+                    valid_distances = distances[valid_mask]
+                    valid_weights = dest_proj.loc[valid_mask.index, weight_col]
+                else:
+                    valid_distances = distances
+                    valid_weights = dest_proj[weight_col]
+                
+                # Calculate weighted average (higher weight = more important = effectively closer)
+                if len(valid_distances) > 0 and valid_weights.sum() > 0:
+                    # Inverse weighting: higher frequency/importance reduces effective distance
+                    weighted_distances = valid_distances / (valid_weights + 1)  # +1 to avoid division by zero
+                    result.loc[idx, 'weighted_avg_distance'] = weighted_distances.mean()
+                else:
+                    result.loc[idx, 'weighted_avg_distance'] = float('inf')
+            else:
+                # No weights available, use simple average
+                if max_distance is not None:
+                    within_range = distances[distances <= max_distance]
+                    if len(within_range) > 0:
+                        result.loc[idx, 'weighted_avg_distance'] = within_range.mean()
+                    else:
+                        result.loc[idx, 'weighted_avg_distance'] = float('inf')
+                else:
+                    result.loc[idx, 'weighted_avg_distance'] = distances.mean()
+    
+    return result
 
 def interpolate_points(line_gdf, distance=100):
     """
