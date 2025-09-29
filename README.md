@@ -17,6 +17,9 @@ This platform analyzes and visualizes how equitably urban infrastructure support
 - **Phase 1-4**: Data acquisition and processing pipeline
 - **Phase 5**: Testing and validation (100% complete)
 - **Phase 6**: Visualization updates (100% complete)
+- **Phase 7**: Transit scoring system (100% complete)
+- **Phase 8**: Sidewalk & ramp scoring system (100% complete)
+- **Phase 9**: Amenity proximity scoring system (100% complete)
 
 ### 🎉 **Production Ready Features:**
 - **Real-time data processing** from GTFS, Census, and OSM sources
@@ -24,6 +27,8 @@ This platform analyzes and visualizes how equitably urban infrastructure support
 - **Comprehensive accessibility metrics** (95.6% wheelchair accessible stops)
 - **Multi-layer visualization** of mobility metrics
 - **Neighborhood-level accessibility scoring** across 495 census tracts
+- **Sidewalk & ramp quality scoring** with accessibility focus
+- **Amenity proximity scoring** with type weighting and accessibility penalties
 - **Data quality assessment** and lineage tracking
 - **Robust error handling** and user feedback
 
@@ -59,6 +64,7 @@ This platform analyzes and visualizes how equitably urban infrastructure support
 
 ### **Analysis:**
 - **Mobility Accessibility Index** combining transit, sidewalk, and amenity scores
+- **Sidewalk Quality Scoring** with coverage, ramp, and accessibility components
 - **Equity gap identification** across neighborhoods
 - **Service coverage analysis** by transit agency
 - **Infrastructure quality assessment**

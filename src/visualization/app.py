@@ -14,7 +14,17 @@ from datetime import datetime
 sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
 
 from src.config import DEFAULT_CITY, DEFAULT_STATE
-from src.visualization.transit_visualizations import TransitVisualizationSuite
+from src.visualization.transit_visualizations import (
+    TransitVisualizationSuite,
+    create_sidewalk_infrastructure_map,
+    create_sidewalk_quality_distribution,
+    create_sidewalk_component_analysis,
+    create_amenity_access_map,
+    create_amenity_access_distribution,
+    create_amenity_type_analysis
+)
+from src.analysis.sidewalk_score import SidewalkScoreCalculator
+from src.analysis.amenity_score import AmenityScoreCalculator
 import matplotlib.pyplot as plt
 import matplotlib
 
@@ -656,35 +666,248 @@ with tab_transit:
         """)
 
 with tab_sidewalks:
-    st.header("Sidewalk Quality")
+    st.header("Sidewalk Quality Analysis")
     
-    if sidewalks_data is not None:
-        st.metric("Total Sidewalk Segments", len(sidewalks_data))
+    if sidewalks_data is not None and census_data is not None:
+        # Initialize sidewalk score calculator
+        sidewalk_calculator = SidewalkScoreCalculator()
         
-        if 'length_km' in sidewalks_data.columns:
-            total_length = sidewalks_data['length_km'].sum()
-            st.metric("Total Sidewalk Length", f"{total_length:.1f} km")
+        # Display sidewalk statistics
+        col1, col2, col3, col4 = st.columns(4)
         
-        # Add sidewalk visualization here
-        st.info("Sidewalk quality visualization will be implemented here.")
+        with col1:
+            st.metric("Total Sidewalk Segments", len(sidewalks_data))
+        
+        with col2:
+            if 'length_km' in sidewalks_data.columns:
+                total_length = sidewalks_data['length_km'].sum()
+                st.metric("Total Sidewalk Length", f"{total_length:.1f} km")
+            else:
+                # Calculate length if not available (convert to projected CRS for accuracy)
+                sidewalks_proj = sidewalks_data.to_crs('EPSG:3857')
+                total_length = sidewalks_proj.geometry.length.sum() / 1000
+                st.metric("Total Sidewalk Length", f"{total_length:.1f} km")
+        
+        with col3:
+            # Count different types of sidewalk infrastructure
+            if 'infrastructure_type' in sidewalks_data.columns:
+                sidewalk_types = sidewalks_data['infrastructure_type'].value_counts()
+                st.metric("Sidewalk-Only Segments", sidewalk_types.get('sidewalk', 0))
+            else:
+                st.metric("Sidewalk Segments", len(sidewalks_data))
+        
+        with col4:
+            if 'infrastructure_type' in sidewalks_data.columns:
+                crossing_count = sidewalk_types.get('crossing', 0)
+                st.metric("Pedestrian Crossings", crossing_count)
+            else:
+                st.metric("Pedestrian Crossings", "Data not available")
+        
+        # Check if we have sidewalk scores from mobility data
+        display_data = census_data
+        score_column = 'sidewalk_quality_score'
+        
+        if mobility_data is not None and 'sidewalk_quality_score' in mobility_data.columns:
+            display_data = mobility_data
+            st.info("📍 Using sidewalk quality scores from mobility data")
+        elif 'sidewalk_quality_score' in census_data.columns:
+            st.info("📍 Using sidewalk quality scores from census data")
+        else:
+            st.warning("⚠️ No sidewalk quality scores found. Showing basic sidewalk infrastructure.")
+            score_column = None
+        
+        # Create the sidewalk infrastructure map
+        try:
+            matplotlib.use('Agg')  # Use non-interactive backend for Streamlit
+            fig = create_sidewalk_infrastructure_map(
+                neighborhoods=display_data,
+                sidewalks=sidewalks_data,
+                crossings=None,  # Crossings will be extracted from sidewalk data
+                score_column=score_column
+            )
+            
+            # Add explanation
+            if score_column:
+                st.markdown("""
+                **Map Explanation:**
+                - **Dark Purple areas**: Neighborhoods with poor/no sidewalk infrastructure (scores 0-30)
+                - **Bright Yellow areas**: Neighborhoods with excellent sidewalk infrastructure (scores 70-100)
+                - **White lines**: Actual sidewalk locations (subtle overlay)
+                - **Score range**: 0-100 (higher = better sidewalk coverage, ramps, and accessibility)
+                - **Note**: Most Seattle neighborhoods have low scores, reflecting real infrastructure gaps
+                """)
+            
+            st.pyplot(fig)
+            plt.close(fig)
+        except Exception as e:
+            st.error(f"Error creating sidewalk infrastructure map: {e}")
+            st.info("Sidewalk quality visualization will be implemented here.")
+        
+        # Add additional visualizations if scores are available
+        if score_column and score_column in display_data.columns:
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                try:
+                    fig_dist = create_sidewalk_quality_distribution(
+                        neighborhoods=display_data,
+                        score_column=score_column
+                    )
+                    st.pyplot(fig_dist)
+                    plt.close(fig_dist)
+                except Exception as e:
+                    st.error(f"Error creating quality distribution: {e}")
+            
+            with col2:
+                try:
+                    component_cols = ['coverage_score', 'ramp_score', 'island_score', 'accessibility_score']
+                    available_cols = [col for col in component_cols if col in display_data.columns]
+                    
+                    if available_cols:
+                        fig_comp = create_sidewalk_component_analysis(
+                            neighborhoods=display_data,
+                            component_columns=available_cols
+                        )
+                        st.pyplot(fig_comp)
+                        plt.close(fig_comp)
+                    else:
+                        st.info("Component analysis requires detailed scoring data")
+                except Exception as e:
+                    st.error(f"Error creating component analysis: {e}")
     else:
-        st.error("Sidewalk data not available. Please run the data pipeline first.")
+        if sidewalks_data is None:
+            st.error("🚫 Sidewalk data not available. Please run the data pipeline first.")
+        if census_data is None:
+            st.error("🚫 Census data not available. Please run the data pipeline first.")
+        
+        st.info("""
+        **To see the enhanced sidewalk quality analysis:**
+        1. Run the data acquisition pipeline to fetch sidewalk and census data
+        2. Run the data integration process to calculate comprehensive sidewalk scores
+        3. The new Sprint 8 sidewalk scoring system will provide detailed quality metrics
+        """)
 
 with tab_amenities:
-    st.header("Amenity Proximity")
+    st.header("Amenity Proximity Analysis")
     
-    if amenities_data is not None:
-        st.metric("Total Amenities", len(amenities_data))
+    if amenities_data is not None and census_data is not None:
+        # Initialize amenity score calculator
+        amenity_calculator = AmenityScoreCalculator()
         
+        # Display amenity statistics
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            st.metric("Total Amenities", len(amenities_data))
+        
+        with col2:
+            if 'amenity' in amenities_data.columns:
+                unique_types = amenities_data['amenity'].nunique()
+                st.metric("Amenity Types", unique_types)
+            else:
+                st.metric("Amenity Types", "N/A")
+        
+        with col3:
+            if 'accessibility_category' in amenities_data.columns:
+                accessible_count = len(amenities_data[amenities_data['accessibility_category'] == 'fully_accessible'])
+                st.metric("Fully Accessible", accessible_count)
+            else:
+                st.metric("Fully Accessible", "N/A")
+        
+        with col4:
+            if 'accessibility_score' in amenities_data.columns:
+                avg_accessibility = amenities_data['accessibility_score'].mean()
+                st.metric("Avg Accessibility Score", f"{avg_accessibility:.2f}")
+            else:
+                st.metric("Avg Accessibility Score", "N/A")
+        
+        # Check if we have amenity access scores from mobility data
+        display_data = census_data
+        score_column = 'amenity_access_score'
+        
+        if mobility_data is not None and 'amenity_access_score' in mobility_data.columns:
+            display_data = mobility_data
+            st.info("📍 Using amenity access scores from mobility data")
+        elif 'amenity_access_score' in census_data.columns:
+            st.info("📍 Using amenity access scores from census data")
+        else:
+            st.warning("⚠️ No amenity access scores found. Showing basic amenity analysis.")
+            score_column = None
+        
+        # Create the amenity access map
+        try:
+            matplotlib.use('Agg')  # Use non-interactive backend for Streamlit
+            fig = create_amenity_access_map(
+                neighborhoods=display_data,
+                amenities=amenities_data,
+                score_column=score_column
+            )
+            
+            # Add explanation
+            if score_column:
+                st.markdown("""
+                **Map Explanation:**
+                - **Dark Purple areas**: Neighborhoods with poor amenity access (low scores)
+                - **Bright Yellow areas**: Neighborhoods with excellent amenity access (high scores)
+                - **Colored dots**: Actual amenity locations (color-coded by type)
+                - **Score range**: 0-100 (higher = better amenity proximity and accessibility)
+                - **Note**: Scores consider distance, amenity importance, and accessibility features
+                """)
+            
+            st.pyplot(fig)
+            plt.close(fig)
+        except Exception as e:
+            st.error(f"Error creating amenity access map: {e}")
+            st.info("Amenity access visualization will be implemented here.")
+        
+        # Create amenity access distribution
+        try:
+            matplotlib.use('Agg')
+            fig = create_amenity_access_distribution(
+                neighborhoods=display_data,
+                score_column=score_column
+            )
+            st.pyplot(fig)
+            plt.close(fig)
+        except Exception as e:
+            st.error(f"Error creating amenity access distribution: {e}")
+        
+        # Create amenity type analysis
+        try:
+            matplotlib.use('Agg')
+            fig = create_amenity_type_analysis(
+                neighborhoods=display_data,
+                amenities=amenities_data
+            )
+            st.pyplot(fig)
+            plt.close(fig)
+        except Exception as e:
+            st.error(f"Error creating amenity type analysis: {e}")
+        
+        # Show amenity type breakdown
         if 'amenity' in amenities_data.columns:
+            st.subheader("Amenity Type Distribution")
             amenity_types = amenities_data['amenity'].value_counts()
-            st.write("**Amenity Types:**")
             st.dataframe(amenity_types.head(10))
-        
-        # Add amenity visualization here
-        st.info("Amenity proximity visualization will be implemented here.")
+            
+            # Show accessibility breakdown
+            if 'accessibility_category' in amenities_data.columns:
+                st.subheader("Accessibility Breakdown")
+                accessibility_counts = amenities_data['accessibility_category'].value_counts()
+                st.dataframe(accessibility_counts)
+    
     else:
-        st.error("Amenity data not available. Please run the data pipeline first.")
+        if amenities_data is None:
+            st.error("🚫 Amenity data not available. Please run the data pipeline first.")
+        if census_data is None:
+            st.error("🚫 Census data not available. Please run the data pipeline first.")
+        
+        st.info("""
+        **To see the enhanced amenity proximity analysis:**
+        1. Run the data acquisition pipeline to fetch amenity and census data
+        2. Run the data integration process to calculate comprehensive amenity scores
+        3. The new Sprint 9 amenity scoring system will provide detailed proximity metrics
+        """)
 
 with tab_mobility:
     st.header("Mobility Accessibility Index")

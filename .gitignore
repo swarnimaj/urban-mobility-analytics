@@ -87,3 +87,4 @@ data/processed/*
 # API keys and secrets
 .env
 config.ini
+pipeline.log

@@ -520,10 +520,24 @@ class DataCleaner:
             self._add_transformation('transit_metrics', 'transit_scores', 'Calculated transit access metrics')
             
             census_data = self._calculate_sidewalk_metrics(census_data, sidewalks)
+            
+            # Calculate comprehensive sidewalk scores if crossings data is available
+            crossings = None
+            curb_ramps = None
+            
+            # Try to extract crossings and curb ramps from sidewalks data
+            if 'infrastructure_type' in sidewalks.columns:
+                crossings = sidewalks[sidewalks['infrastructure_type'] == 'crossing'].copy()
+                curb_ramps = sidewalks[sidewalks['infrastructure_type'] == 'curb_ramp'].copy()
+            
+            census_data = self._calculate_comprehensive_sidewalk_scores(
+                census_data, sidewalks, crossings, curb_ramps
+            )
             self._add_transformation('sidewalk_metrics', 'sidewalk_scores', 'Calculated sidewalk quality metrics')
             
-            census_data = self._calculate_amenity_metrics(census_data, amenities)
-            self._add_transformation('amenity_metrics', 'amenity_scores', 'Calculated amenity proximity metrics')
+            # Calculate comprehensive amenity scores if amenities data is available
+            census_data = self._calculate_comprehensive_amenity_scores(census_data, amenities)
+            self._add_transformation('amenity_metrics', 'amenity_scores', 'Calculated comprehensive amenity proximity metrics')
             
             # Calculate mobility index
             census_data = self._calculate_mobility_index(census_data)
@@ -941,6 +955,46 @@ class DataCleaner:
         
         return census_data
     
+    def _calculate_comprehensive_sidewalk_scores(self, census_data, sidewalks, crossings=None, curb_ramps=None):
+        """Calculate comprehensive sidewalk scores using the new scoring system."""
+        try:
+            if sidewalks is None or sidewalks.empty:
+                logger.warning("No sidewalk data available for comprehensive scoring")
+                return census_data
+            
+            # Import the sidewalk scoring module
+            from src.analysis.sidewalk_score import SidewalkScoreCalculator
+            
+            # Initialize calculator
+            calculator = SidewalkScoreCalculator()
+            
+            # Calculate comprehensive scores
+            logger.info(f"Calculating comprehensive sidewalk scores for {len(census_data)} neighborhoods")
+            result = calculator.calculate_comprehensive_sidewalk_score(
+                neighborhoods=census_data,
+                sidewalks=sidewalks,
+                crossings=crossings,
+                curb_ramps=curb_ramps
+            )
+            logger.info(f"Comprehensive scoring complete. Result columns: {list(result.columns)}")
+            
+            # Update census_data with new scores
+            score_columns = [
+                'sidewalk_quality_score', 'coverage_score', 'ramp_score', 
+                'island_score', 'accessibility_score'
+            ]
+            
+            for col in score_columns:
+                if col in result.columns:
+                    census_data[col] = result[col]
+            
+            logger.info("Comprehensive sidewalk scores calculation complete")
+            return census_data
+            
+        except Exception as e:
+            logger.error(f"Error calculating comprehensive sidewalk scores: {e}")
+            return census_data
+    
     def _calculate_amenity_metrics(self, census_data, amenities):
         """Calculate amenity access metrics per census tract."""
         logger.info("Calculating amenity metrics")
@@ -987,6 +1041,40 @@ class DataCleaner:
             census_data['amenities_per_sqkm'] = 0
         
         return census_data
+    
+    def _calculate_comprehensive_amenity_scores(self, census_data, amenities):
+        """Calculate comprehensive amenity proximity scores using the new scoring system."""
+        try:
+            if amenities is None or amenities.empty:
+                logger.warning("No amenity data available for comprehensive scoring")
+                return census_data
+            
+            # Import the amenity scoring module
+            from src.analysis.amenity_score import AmenityScoreCalculator
+            
+            # Initialize calculator
+            amenity_calculator = AmenityScoreCalculator(
+                max_distance=2000.0,  # 2km max distance
+                distance_method='euclidean',
+                accessibility_penalty=0.5
+            )
+            
+            logger.info("Calculating comprehensive amenity scores for all neighborhoods")
+            
+            # Calculate comprehensive amenity scores
+            census_data = amenity_calculator.calculate_comprehensive_amenity_score(
+                census_data, amenities
+            )
+            
+            logger.info("Comprehensive amenity scoring complete. Result columns: " + 
+                       str([col for col in census_data.columns if 'amenity' in col.lower()]))
+            
+            return census_data
+            
+        except Exception as e:
+            logger.error(f"Error calculating comprehensive amenity scores: {e}")
+            # Fall back to basic amenity metrics
+            return self._calculate_amenity_metrics(census_data, amenities)
     
     def assess_data_quality(self, dataset_name: str, data: gpd.GeoDataFrame) -> Dict[str, Any]:
         """
@@ -1137,15 +1225,17 @@ class DataCleaner:
             
             census_data['transit_access_score'] = transit_score
         
-        # Sidewalk quality score
-        if 'sidewalk_km_per_sqkm' in census_data.columns:
-            max_sidewalk = census_data['sidewalk_km_per_sqkm'].max()
-            if max_sidewalk > 0:
-                census_data['sidewalk_quality_score'] = (census_data['sidewalk_km_per_sqkm'] / max_sidewalk) * 100
+        # Sidewalk quality score - use new comprehensive scoring if available
+        if 'sidewalk_quality_score' not in census_data.columns:
+            logger.info("Comprehensive sidewalk scoring not found, using fallback method")
+            if 'sidewalk_km_per_sqkm' in census_data.columns:
+                max_sidewalk = census_data['sidewalk_km_per_sqkm'].max()
+                if max_sidewalk > 0:
+                    census_data['sidewalk_quality_score'] = (census_data['sidewalk_km_per_sqkm'] / max_sidewalk) * 100
+                else:
+                    census_data['sidewalk_quality_score'] = 0
             else:
                 census_data['sidewalk_quality_score'] = 0
-        else:
-            census_data['sidewalk_quality_score'] = 0
         
         # Amenity proximity score
         if 'amenities_per_sqkm' in census_data.columns:

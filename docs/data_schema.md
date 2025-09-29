@@ -159,6 +159,40 @@ Combined mobility accessibility index with normalized scoring:
 | `sidewalk_quality_score` | float | Sidewalk quality component | ≥0 |
 | `amenity_proximity_score` | float | Amenity proximity component | ≥0 |
 
+### Sidewalk Scoring Fields (Sprint 8)
+
+Additional fields added for comprehensive sidewalk and ramp accessibility scoring:
+
+| Column | Type | Description | Range |
+|--------|------|-------------|-------|
+| `sidewalk_coverage_pct` | float | Sidewalk coverage percentage | 0-100 |
+| `sidewalk_length_km` | float | Total sidewalk length in kilometers | ≥0 |
+| `sidewalk_density_km_sqkm` | float | Sidewalk density per square kilometer | ≥0 |
+| `total_crossings` | float | Number of pedestrian crossings | ≥0 |
+| `crossings_with_ramps` | float | Crossings with curb ramps | ≥0 |
+| `ramp_coverage_pct` | float | Curb ramp coverage percentage | 0-100 |
+| `crossings_with_islands` | float | Crossings with pedestrian islands | ≥0 |
+| `island_coverage_pct` | float | Pedestrian island coverage percentage | 0-100 |
+| `coverage_score` | float | Normalized coverage score | 0-100 |
+| `ramp_score` | float | Normalized ramp score | 0-100 |
+| `island_score` | float | Normalized island score | 0-100 |
+| `accessibility_score` | float | Combined accessibility score | 0-100 |
+| `sidewalk_quality_score` | float | Final normalized sidewalk quality score | 0-100 |
+
+### Amenity Proximity Fields (Sprint 9)
+
+Additional fields added for comprehensive amenity proximity and accessibility scoring:
+
+| Column | Type | Description | Range |
+|--------|------|-------------|-------|
+| `amenity_access_score` | float | Final normalized amenity access score | 0-100 |
+| `amenity_density` | float | Amenity density per neighborhood | ≥0 |
+| `amenity_diversity` | float | Number of unique amenity types | ≥0 |
+| `raw_amenity_score` | float | Raw score before normalization | ≥0 |
+| `avg_amenity_score` | float | Average score per amenity | ≥0 |
+| `amenity_count` | int | Total number of amenities within range | ≥0 |
+| `avg_distance` | float | Average distance to amenities (meters) | ≥0 |
+
 ## Metadata and Quality Tracking
 
 ### Metadata File

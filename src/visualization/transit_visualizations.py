@@ -55,7 +55,7 @@ class TransitVisualizationSuite:
     Comprehensive transit accessibility visualization suite.
     """
     
-    def __init__(self, figsize: Tuple[int, int] = (12, 8), dpi: int = 300):
+    def __init__(self, figsize: Tuple[int, int] = (10, 6), dpi: int = 150):
         """
         Initialize the visualization suite.
         
@@ -642,3 +642,516 @@ def create_simple_transit_map(neighborhoods: gpd.GeoDataFrame,
     """
     visualizer = TransitVisualizationSuite()
     return visualizer.create_transit_access_map(neighborhoods, transit_stops, score_column)
+
+
+# Sidewalk visualization functions
+
+def create_sidewalk_infrastructure_map(neighborhoods: gpd.GeoDataFrame,
+                                     sidewalks: gpd.GeoDataFrame,
+                                     crossings: Optional[gpd.GeoDataFrame] = None,
+                                     score_column: str = 'sidewalk_quality_score',
+                                     output_path: Optional[str] = None) -> plt.Figure:
+    """
+    Create a map of sidewalk infrastructure and quality scores.
+    
+    Args:
+        neighborhoods: GeoDataFrame with sidewalk scores
+        sidewalks: GeoDataFrame of sidewalk segments
+        crossings: Optional GeoDataFrame of pedestrian crossings
+        score_column: Column name for sidewalk scores
+        output_path: Optional path to save the figure
+        
+    Returns:
+        Matplotlib figure object
+    """
+    try:
+        logger.info("Creating sidewalk infrastructure map")
+        
+        fig, ax = plt.subplots(1, 1, figsize=(10, 6), dpi=150)
+        
+        # Plot neighborhoods colored by sidewalk score
+        if score_column in neighborhoods.columns:
+            # Filter out NaN values and ensure we have valid data
+            valid_data = neighborhoods.dropna(subset=[score_column])
+            if not valid_data.empty:
+                # Use a better colormap and ensure proper scaling
+                vmin = valid_data[score_column].min()
+                vmax = valid_data[score_column].max()
+                
+                # For better visualization of low scores, use a different approach
+                # Create custom bins to better show variation in low scores
+                if vmax - vmin < 50:  # If range is small, use quantile-based scaling
+                    q25 = valid_data[score_column].quantile(0.25)
+                    q75 = valid_data[score_column].quantile(0.75)
+                    vmin = max(0, q25 - (q75 - q25) * 0.5)  # Extend range slightly below Q25
+                    vmax = min(100, q75 + (q75 - q25) * 0.5)  # Extend range slightly above Q75
+                
+                valid_data.plot(
+                    column=score_column,
+                    ax=ax,
+                    legend=True,
+                    cmap='plasma',  # Better colormap for low values
+                    vmin=vmin,
+                    vmax=vmax,
+                    edgecolor='white',
+                    linewidth=0.5,
+                    legend_kwds={
+                        'label': 'Sidewalk Quality Score (0-100)',
+                        'shrink': 0.8,
+                        'orientation': 'vertical',
+                        'pad': 0.02
+                    }
+                )
+            else:
+                logger.warning("No valid sidewalk score data found")
+                neighborhoods.plot(ax=ax, color='lightgray', edgecolor='white', linewidth=0.5)
+        else:
+            logger.warning(f"Score column '{score_column}' not found, using default styling")
+            neighborhoods.plot(ax=ax, color='lightgray', edgecolor='white', linewidth=0.5)
+        
+        # Plot sidewalks (subtle overlay)
+        if not sidewalks.empty:
+            sidewalks.plot(ax=ax, color='white', linewidth=0.5, alpha=0.3)
+        
+        # Plot crossings if available (subtle overlay)
+        if crossings is not None and not crossings.empty:
+            crossings.plot(ax=ax, color='white', markersize=8, alpha=0.5)
+        
+        # Styling
+        ax.set_title('Sidewalk Quality by Neighborhood\n(Dark Purple = Poor, Bright Yellow = Excellent)', fontsize=16, fontweight='bold')
+        ax.set_xlabel('Longitude (West to East)', fontsize=12)
+        ax.set_ylabel('Latitude (South to North)', fontsize=12)
+        ax.grid(True, alpha=0.3)
+        
+        # Add some axis ticks for geographic reference
+        ax.tick_params(axis='both', which='major', labelsize=10, length=3)
+        ax.tick_params(axis='both', which='minor', labelsize=8, length=2)
+        
+        # No legend needed - the colorbar explains everything
+        
+        plt.tight_layout()
+        
+        if output_path:
+            plt.savefig(output_path, dpi=300, bbox_inches='tight')
+            logger.info(f"Sidewalk infrastructure map saved to {output_path}")
+        
+        return fig
+        
+    except Exception as e:
+        logger.error(f"Error creating sidewalk infrastructure map: {e}")
+        fig, ax = plt.subplots(1, 1, figsize=(12, 8))
+        ax.text(0.5, 0.5, f'Error creating map:\n{str(e)}', 
+               ha='center', va='center', transform=ax.transAxes)
+        return fig
+
+
+def create_sidewalk_quality_distribution(neighborhoods: gpd.GeoDataFrame,
+                                       score_column: str = 'sidewalk_quality_score',
+                                       output_path: Optional[str] = None) -> plt.Figure:
+    """
+    Create distribution plots for sidewalk quality scores.
+    
+    Args:
+        neighborhoods: GeoDataFrame with sidewalk scores
+        score_column: Column name for sidewalk scores
+        output_path: Optional path to save the figure
+        
+    Returns:
+        Matplotlib figure object
+    """
+    try:
+        logger.info("Creating sidewalk quality distribution plot")
+        
+        if score_column not in neighborhoods.columns:
+            logger.warning(f"Score column '{score_column}' not found")
+            fig, ax = plt.subplots(1, 1, figsize=(10, 6))
+            ax.text(0.5, 0.5, f'Score column "{score_column}" not found', 
+                   ha='center', va='center', transform=ax.transAxes)
+            return fig
+        
+        fig, axes = plt.subplots(1, 2, figsize=(12, 5), dpi=150)
+        
+        scores = neighborhoods[score_column].dropna()
+        
+        if len(scores) == 0:
+            for ax in axes:
+                ax.text(0.5, 0.5, 'No valid scores found', ha='center', va='center')
+            return fig
+        
+        # Histogram
+        axes[0].hist(scores, bins=20, alpha=0.7, color='lightblue', edgecolor='black')
+        axes[0].set_title('Distribution of Sidewalk Quality Scores')
+        axes[0].set_xlabel('Sidewalk Quality Score')
+        axes[0].set_ylabel('Number of Areas')
+        axes[0].grid(True, alpha=0.3)
+        
+        # Add mean and median lines
+        mean_score = scores.mean()
+        median_score = scores.median()
+        axes[0].axvline(mean_score, color='red', linestyle='--', linewidth=2, 
+                       label=f'Mean: {mean_score:.1f}')
+        axes[0].axvline(median_score, color='green', linestyle='--', linewidth=2, 
+                       label=f'Median: {median_score:.1f}')
+        axes[0].legend()
+        
+        # Box plot
+        axes[1].boxplot(scores, vert=True)
+        axes[1].set_title('Sidewalk Quality Score Box Plot')
+        axes[1].set_ylabel('Sidewalk Quality Score')
+        axes[1].grid(True, alpha=0.3)
+        
+        # Add statistics text
+        stats_text = f'Count: {len(scores)}\nMean: {mean_score:.1f}\nMedian: {median_score:.1f}\nStd: {scores.std():.1f}'
+        axes[1].text(0.02, 0.98, stats_text, transform=axes[1].transAxes, 
+                    verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+        
+        plt.tight_layout()
+        
+        if output_path:
+            plt.savefig(output_path, dpi=300, bbox_inches='tight')
+            logger.info(f"Sidewalk quality distribution plot saved to {output_path}")
+        
+        return fig
+        
+    except Exception as e:
+        logger.error(f"Error creating sidewalk quality distribution: {e}")
+        fig, ax = plt.subplots(1, 1, figsize=(10, 6))
+        ax.text(0.5, 0.5, f'Error creating plot:\n{str(e)}', 
+               ha='center', va='center', transform=ax.transAxes)
+        return fig
+
+
+def create_sidewalk_component_analysis(neighborhoods: gpd.GeoDataFrame,
+                                     component_columns: List[str] = None,
+                                     output_path: Optional[str] = None) -> plt.Figure:
+    """
+    Create analysis of sidewalk score components.
+    
+    Args:
+        neighborhoods: GeoDataFrame with sidewalk score components
+        output_path: Optional path to save the figure
+        
+    Returns:
+        Matplotlib figure object
+    """
+    try:
+        logger.info("Creating sidewalk component analysis")
+        
+        # Use provided component columns or default ones
+        if component_columns is None:
+            component_cols = ['coverage_score', 'ramp_score', 'island_score', 'accessibility_score']
+        else:
+            component_cols = component_columns
+        
+        available_cols = [col for col in component_cols if col in neighborhoods.columns]
+        
+        if not available_cols:
+            logger.warning("No sidewalk component scores found")
+            fig, ax = plt.subplots(1, 1, figsize=(10, 6))
+            ax.text(0.5, 0.5, 'No sidewalk component scores found', 
+                   ha='center', va='center', transform=ax.transAxes)
+            return fig
+        
+        fig, axes = plt.subplots(2, 2, figsize=(12, 8), dpi=150)
+        axes = axes.flatten()
+        
+        for i, col in enumerate(available_cols[:4]):  # Limit to 4 components
+            if col in neighborhoods.columns:
+                data = neighborhoods[col].dropna()
+                
+                if len(data) > 0:
+                    # Histogram
+                    axes[i].hist(data, bins=15, alpha=0.7, color=plt.cm.Set1(i), edgecolor='black')
+                    axes[i].set_title(f'{col.replace("_", " ").title()}')
+                    axes[i].set_xlabel('Score')
+                    axes[i].set_ylabel('Frequency')
+                    axes[i].grid(True, alpha=0.3)
+                    
+                    # Add mean line
+                    mean_val = data.mean()
+                    axes[i].axvline(mean_val, color='red', linestyle='--', linewidth=2, 
+                                   label=f'Mean: {mean_val:.1f}')
+                    axes[i].legend()
+                else:
+                    axes[i].text(0.5, 0.5, f'No data for {col}', ha='center', va='center')
+            else:
+                axes[i].text(0.5, 0.5, f'Column {col} not found', ha='center', va='center')
+        
+        # Hide unused subplots
+        for i in range(len(available_cols), len(axes)):
+            axes[i].set_visible(False)
+        
+        plt.suptitle('Sidewalk Score Component Analysis', fontsize=16, fontweight='bold')
+        plt.tight_layout()
+        
+        if output_path:
+            plt.savefig(output_path, dpi=300, bbox_inches='tight')
+            logger.info(f"Sidewalk component analysis saved to {output_path}")
+        
+        return fig
+        
+    except Exception as e:
+        logger.error(f"Error creating sidewalk component analysis: {e}")
+        fig, ax = plt.subplots(1, 1, figsize=(10, 6))
+        ax.text(0.5, 0.5, f'Error creating analysis:\n{str(e)}', 
+               ha='center', va='center', transform=ax.transAxes)
+        return fig
+
+
+# =============================================================================
+# AMENITY ACCESS VISUALIZATION FUNCTIONS
+# =============================================================================
+
+def create_amenity_access_map(neighborhoods: gpd.GeoDataFrame,
+                            amenities: gpd.GeoDataFrame,
+                            score_column: str = 'amenity_access_score',
+                            output_path: Optional[str] = None) -> plt.Figure:
+    """
+    Create a map showing amenity access scores by neighborhood.
+    
+    Args:
+        neighborhoods: GeoDataFrame with neighborhood geometries and scores
+        amenities: GeoDataFrame with amenity locations
+        score_column: Column name containing amenity access scores
+        output_path: Optional path to save the figure
+        
+    Returns:
+        Matplotlib figure object
+    """
+    logger.info("Creating amenity access map")
+    
+    try:
+        # Create figure with appropriate size
+        fig, ax = plt.subplots(1, 1, figsize=(10, 6), dpi=150)
+        
+        # Plot neighborhoods colored by amenity access score
+        if score_column in neighborhoods.columns:
+            # Filter out NaN values and ensure we have valid data
+            valid_data = neighborhoods.dropna(subset=[score_column])
+            if not valid_data.empty:
+                # Use quantile-based scaling for better visualization
+                vmin = valid_data[score_column].min()
+                vmax = valid_data[score_column].max()
+                
+                # For better visualization of low scores, use quantile-based scaling
+                if vmax - vmin < 50:  # If range is small, use quantile-based scaling
+                    q25 = valid_data[score_column].quantile(0.25)
+                    q75 = valid_data[score_column].quantile(0.75)
+                    vmin = max(0, q25 - (q75 - q25) * 0.5)
+                    vmax = min(100, q75 + (q75 - q25) * 0.5)
+                
+                valid_data.plot(
+                    column=score_column,
+                    ax=ax,
+                    legend=True,
+                    cmap='plasma',  # Good colormap for continuous data
+                    vmin=vmin,
+                    vmax=vmax,
+                    edgecolor='white',
+                    linewidth=0.5,
+                    legend_kwds={
+                        'label': 'Amenity Access Score (0-100)',
+                        'shrink': 0.8,
+                        'orientation': 'vertical',
+                        'pad': 0.02
+                    }
+                )
+            else:
+                logger.warning("No valid amenity access score data found")
+                neighborhoods.plot(ax=ax, color='lightgray', edgecolor='white', linewidth=0.5)
+        else:
+            logger.warning(f"Score column '{score_column}' not found, using default styling")
+            neighborhoods.plot(ax=ax, color='lightgray', edgecolor='white', linewidth=0.5)
+        
+        # Plot amenities as points (subtle overlay)
+        if not amenities.empty:
+            # Color amenities by type for better visualization
+            amenity_colors = {
+                'hospital': 'red',
+                'clinic': 'orange', 
+                'doctors': 'orange',
+                'pharmacy': 'yellow',
+                'school': 'blue',
+                'library': 'green',
+                'bank': 'purple',
+                'restaurant': 'pink',
+                'cafe': 'brown',
+                'default': 'gray'
+            }
+            
+            for amenity_type in amenities['amenity'].unique():
+                if pd.notna(amenity_type):
+                    type_amenities = amenities[amenities['amenity'] == amenity_type]
+                    color = amenity_colors.get(amenity_type, amenity_colors['default'])
+                    type_amenities.plot(ax=ax, color=color, markersize=8, alpha=0.6, 
+                                      label=f'{amenity_type.title()}' if len(type_amenities) > 0 else None)
+        
+        # Styling
+        ax.set_title('Amenity Access by Neighborhood\n(Dark Purple = Poor Access, Bright Yellow = Excellent Access)', 
+                    fontsize=16, fontweight='bold')
+        ax.set_xlabel('Longitude (West to East)', fontsize=12)
+        ax.set_ylabel('Latitude (South to North)', fontsize=12)
+        ax.grid(True, alpha=0.3)
+        
+        # Add some axis ticks for geographic reference
+        ax.tick_params(axis='both', which='major', labelsize=10, length=3)
+        ax.tick_params(axis='both', which='minor', labelsize=8, length=2)
+        
+        plt.tight_layout()
+        
+        if output_path:
+            plt.savefig(output_path, dpi=300, bbox_inches='tight')
+        
+        return fig
+        
+    except Exception as e:
+        logger.error(f"Error creating amenity access map: {e}")
+        fig, ax = plt.subplots(1, 1, figsize=(10, 6))
+        ax.text(0.5, 0.5, f'Error creating amenity access map:\n{str(e)}', 
+               ha='center', va='center', transform=ax.transAxes)
+        return fig
+
+
+def create_amenity_access_distribution(neighborhoods: gpd.GeoDataFrame,
+                                     score_column: str = 'amenity_access_score',
+                                     output_path: Optional[str] = None) -> plt.Figure:
+    """
+    Create a histogram showing the distribution of amenity access scores.
+    
+    Args:
+        neighborhoods: GeoDataFrame with amenity access scores
+        score_column: Column name containing amenity access scores
+        output_path: Optional path to save the figure
+        
+    Returns:
+        Matplotlib figure object
+    """
+    logger.info("Creating amenity access distribution")
+    
+    try:
+        # Create figure
+        fig, ax = plt.subplots(1, 1, figsize=(10, 6), dpi=150)
+        
+        if score_column in neighborhoods.columns:
+            scores = neighborhoods[score_column].dropna()
+            
+            if not scores.empty:
+                # Create histogram
+                n, bins, patches = ax.hist(scores, bins=30, alpha=0.7, color='skyblue', edgecolor='black')
+                
+                # Add statistical lines
+                mean_score = scores.mean()
+                median_score = scores.median()
+                
+                ax.axvline(mean_score, color='red', linestyle='--', linewidth=2, label=f'Mean: {mean_score:.1f}')
+                ax.axvline(median_score, color='green', linestyle='--', linewidth=2, label=f'Median: {median_score:.1f}')
+                
+                # Styling
+                ax.set_title('Distribution of Amenity Access Scores', fontsize=16, fontweight='bold')
+                ax.set_xlabel('Amenity Access Score', fontsize=12)
+                ax.set_ylabel('Number of Neighborhoods', fontsize=12)
+                ax.legend()
+                ax.grid(True, alpha=0.3)
+                
+                # Add statistics text box
+                stats_text = f'Count: {len(scores)}\nMean: {mean_score:.2f}\nMedian: {median_score:.2f}\nStd: {scores.std():.2f}'
+                ax.text(0.02, 0.98, stats_text, transform=ax.transAxes, 
+                       verticalalignment='top', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+            else:
+                ax.text(0.5, 0.5, 'No amenity access score data available', 
+                       ha='center', va='center', transform=ax.transAxes)
+        else:
+            ax.text(0.5, 0.5, f'Score column "{score_column}" not found', 
+                   ha='center', va='center', transform=ax.transAxes)
+        
+        plt.tight_layout()
+        
+        if output_path:
+            plt.savefig(output_path, dpi=300, bbox_inches='tight')
+        
+        return fig
+        
+    except Exception as e:
+        logger.error(f"Error creating amenity access distribution: {e}")
+        fig, ax = plt.subplots(1, 1, figsize=(10, 6))
+        ax.text(0.5, 0.5, f'Error creating distribution:\n{str(e)}', 
+               ha='center', va='center', transform=ax.transAxes)
+        return fig
+
+
+def create_amenity_type_analysis(neighborhoods: gpd.GeoDataFrame,
+                                amenities: gpd.GeoDataFrame,
+                                output_path: Optional[str] = None) -> plt.Figure:
+    """
+    Create analysis of amenity types and their accessibility.
+    
+    Args:
+        neighborhoods: GeoDataFrame with neighborhood data
+        amenities: GeoDataFrame with amenity data
+        output_path: Optional path to save the figure
+        
+    Returns:
+        Matplotlib figure object
+    """
+    logger.info("Creating amenity type analysis")
+    
+    try:
+        # Create figure with subplots
+        fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(12, 10), dpi=150)
+        
+        # 1. Amenity type distribution
+        if 'amenity' in amenities.columns:
+            amenity_counts = amenities['amenity'].value_counts().head(10)
+            amenity_counts.plot(kind='bar', ax=ax1, color='skyblue')
+            ax1.set_title('Top 10 Amenity Types', fontweight='bold')
+            ax1.set_xlabel('Amenity Type')
+            ax1.set_ylabel('Count')
+            ax1.tick_params(axis='x', rotation=45)
+        else:
+            ax1.text(0.5, 0.5, 'No amenity type data', ha='center', va='center', transform=ax1.transAxes)
+        
+        # 2. Accessibility distribution
+        if 'accessibility_category' in amenities.columns:
+            accessibility_counts = amenities['accessibility_category'].value_counts()
+            colors = ['green', 'orange', 'red', 'gray']
+            accessibility_counts.plot(kind='pie', ax=ax2, colors=colors[:len(accessibility_counts)], autopct='%1.1f%%')
+            ax2.set_title('Amenity Accessibility Distribution', fontweight='bold')
+            ax2.set_ylabel('')
+        else:
+            ax2.text(0.5, 0.5, 'No accessibility data', ha='center', va='center', transform=ax2.transAxes)
+        
+        # 3. Accessibility scores by amenity type
+        if 'accessibility_score' in amenities.columns and 'amenity' in amenities.columns:
+            accessibility_by_type = amenities.groupby('amenity')['accessibility_score'].mean().sort_values(ascending=False).head(8)
+            accessibility_by_type.plot(kind='bar', ax=ax3, color='lightcoral')
+            ax3.set_title('Average Accessibility Score by Amenity Type', fontweight='bold')
+            ax3.set_xlabel('Amenity Type')
+            ax3.set_ylabel('Average Accessibility Score')
+            ax3.tick_params(axis='x', rotation=45)
+        else:
+            ax3.text(0.5, 0.5, 'No accessibility score data', ha='center', va='center', transform=ax3.transAxes)
+        
+        # 4. Wheelchair accessibility
+        if 'wheelchair_score' in amenities.columns and 'amenity' in amenities.columns:
+            wheelchair_by_type = amenities.groupby('amenity')['wheelchair_score'].mean().sort_values(ascending=False).head(8)
+            wheelchair_by_type.plot(kind='bar', ax=ax4, color='lightgreen')
+            ax4.set_title('Average Wheelchair Score by Amenity Type', fontweight='bold')
+            ax4.set_xlabel('Amenity Type')
+            ax4.set_ylabel('Average Wheelchair Score')
+            ax4.tick_params(axis='x', rotation=45)
+        else:
+            ax4.text(0.5, 0.5, 'No wheelchair score data', ha='center', va='center', transform=ax4.transAxes)
+        
+        plt.tight_layout()
+        
+        if output_path:
+            plt.savefig(output_path, dpi=300, bbox_inches='tight')
+        
+        return fig
+        
+    except Exception as e:
+        logger.error(f"Error creating amenity type analysis: {e}")
+        fig, ax = plt.subplots(1, 1, figsize=(10, 6))
+        ax.text(0.5, 0.5, f'Error creating analysis:\n{str(e)}', 
+               ha='center', va='center', transform=ax.transAxes)
+        return fig
